@@ -4,14 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from functools import partial
 from typing import Any, Tuple
 
 import torch
 from pytorch_lightning import LightningModule
+from torch.distributed.fsdp import FullyShardedDataParallel
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torchmultimodal.models.flava import (
     flava_model_for_classification,
     flava_model_for_pretraining,
 )
+from torchmultimodal.modules.layers.transformer import FLAVATransformerLayer
 from transformers.optimization import get_cosine_schedule_with_warmup
 
 
@@ -61,18 +65,19 @@ class FLAVAPreTrainingLightningModule(LightningModule):
 
     def training_step(self, batch, batch_idx):
         output = self._step(batch, batch_idx)
-        losses = output.losses
+        # print(f"The output in lm is {output}")
+        # print(f"output keys are {output.keys()}")
+        losses = output["losses"]
         total_loss = 0
         for key in losses:
             if losses[key] is not None:
                 total_loss += losses[key]
                 self.log(f"train/losses/{key}", losses[key], prog_bar=True, logger=True)
-
         return total_loss
 
     def validation_step(self, batch, batch_idx):
         output = self._step(batch, batch_idx)
-        losses = output.losses
+        losses = output["losses"]
         total_loss = 0
         for key in losses:
             if losses[key] is not None:
@@ -92,7 +97,7 @@ class FLAVAPreTrainingLightningModule(LightningModule):
             required_embedding = "text"
         else:
             raise RuntimeError("Batch needs to have either or both 'image' and 'text'.")
-
+        # print(self.model)
         output = self.model(
             image=batch.get("image", None),
             image_for_codebook=batch.get("image_for_codebook", None),
@@ -115,6 +120,13 @@ class FLAVAPreTrainingLightningModule(LightningModule):
             self.warmup_steps,
             self.max_steps,
         )
+
+    def configure_sharded_model(self) -> None:
+        p = partial(
+            transformer_auto_wrap_policy, transformer_layer_cls={FLAVATransformerLayer}
+        )
+        self.model = FullyShardedDataParallel(self.model, auto_wrap_policy=p)
+        print("My fsdp model ", self.model)
 
 
 class FLAVAClassificationLightningModule(LightningModule):
